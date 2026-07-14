@@ -27,19 +27,6 @@ jobs:
       run: |
         echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" > .env
 
-    - name: Create debug.keystore
-      run: |
-        # Generate a debug keystore in the repository root so Gradle can find it
-        keytool -genkeypair -v \
-          -keystore debug.keystore \
-          -storepass android \
-          -keypass android \
-          -alias androiddebugkey \
-          -keyalg RSA \
-          -keysize 2048 \
-          -validity 10000 \
-          -dname "CN=Android Debug,O=Android,C=US"
-
     - name: Build APK
       run: gradle :app:assembleDebug
 

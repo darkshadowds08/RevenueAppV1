@@ -309,6 +309,8 @@ data class LocalFamilyItem(
 @Composable
 fun FamilyEditDialog(
     families: List<AppViewModel.FamilyConfig>,
+    useFixedPortion: Boolean,
+    onUseFixedPortionChanged: (Boolean) -> Unit,
     onDismiss: () -> Unit,
     onSaveFamilies: (List<AppViewModel.FamilyConfig>) -> Unit
 ) {
@@ -320,6 +322,7 @@ fun FamilyEditDialog(
             }
         )
     }
+    var localUseFixedPortion by remember { mutableStateOf(useFixedPortion) }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -352,7 +355,42 @@ fun FamilyEditDialog(
                     modifier = Modifier.fillMaxWidth(),
                     fontSize = 11.sp
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Quick Toggle inside Dialog
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F5F9)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = "تفعيل النصيب المحدد للأسر",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1E293B)
+                            )
+                            Text(
+                                text = "تفعيل هذا الخيار يعتمد المبلغ الثابت المدخل بجانب كل أسرة. إلغاء التفعيل يقسم صافي أرباح الأسبوع بالتساوي.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF64748B),
+                                fontSize = 9.sp
+                            )
+                        }
+                        Switch(
+                            checked = localUseFixedPortion,
+                            onCheckedChange = { localUseFixedPortion = it },
+                            modifier = Modifier.testTag("dialog_use_fixed_portion_switch")
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
 
                 Column(
                     modifier = Modifier
@@ -499,6 +537,7 @@ fun FamilyEditDialog(
                                 val portion = family.portion.toDoubleOrNull() ?: 0.0
                                 AppViewModel.FamilyConfig(id = family.id, name = name, portion = portion)
                             }
+                            onUseFixedPortionChanged(localUseFixedPortion)
                             onSaveFamilies(updatedFamilies)
                             onDismiss()
                         },
@@ -1279,6 +1318,7 @@ fun DashboardScreen(
     val paidFamiliesMap by viewModel.paidFamiliesMapState.collectAsState()
     val reportedWeeks by viewModel.reportedWeeksState.collectAsState()
     val familyCustomAmounts by viewModel.familyCustomAmountsState.collectAsState()
+    val useFixedPortion by viewModel.useFixedPortionState.collectAsState()
 
     val totalRickshawRevenue = weeklySummaries.sumOf { it.totalRevenue }
     val totalShopRevenue = monthlySummaries.sumOf { it.totalRevenue }
@@ -1293,12 +1333,22 @@ fun DashboardScreen(
     var grandTotalPaidToFamilies = 0.0
     for (summary in weeklySummaries) {
         val paidIds = paidFamiliesMap[summary.weekKey] ?: emptySet()
+        val activeFamiliesCount = families.count { it.portion > 0 }
+        
+        val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
+        val defaultFamilyShare = if (weekUseFixedPortion) 0.0 else {
+            if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
+        }
+
         for (family in families) {
             val customAmount = familyCustomAmounts["${summary.weekKey}_${family.id}"]
             val isCustomActive = customAmount != null
             val isFamilyActive = family.portion > 0 || isCustomActive
             if (isFamilyActive && paidIds.contains(family.id)) {
-                grandTotalPaidToFamilies += customAmount ?: family.portion
+                val familyShare = if (family.portion <= 0) 0.0 else {
+                    customAmount ?: (if (weekUseFixedPortion) family.portion else defaultFamilyShare)
+                }
+                grandTotalPaidToFamilies += familyShare
             }
         }
     }
@@ -1306,6 +1356,8 @@ fun DashboardScreen(
     if (showFamilyEditDialog) {
         FamilyEditDialog(
             families = families,
+            useFixedPortion = useFixedPortion,
+            onUseFixedPortionChanged = { viewModel.setUseFixedPortion(it) },
             onDismiss = { showFamilyEditDialog = false },
             onSaveFamilies = onSaveFamilies
         )
@@ -1374,11 +1426,13 @@ fun DashboardScreen(
             items(weeklySummaries.take(3)) { summary ->
                 val currentPaid = paidFamiliesMap[summary.weekKey] ?: emptySet()
                 val isReported = reportedWeeks.contains(summary.weekKey)
+                val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
                 WeeklySummaryCard(
                     summary = summary,
                     families = families,
                     currentPaid = currentPaid,
                     isReported = isReported,
+                    useFixedPortion = weekUseFixedPortion,
                     customAmounts = familyCustomAmounts,
                     onTogglePaid = { familyId, isPaid ->
                         viewModel.toggleFamilyPayment(summary.weekKey, familyId, isPaid)
@@ -1610,6 +1664,7 @@ fun FamilyDistributionGrid(
     sharePerFamily: Double,
     families: List<AppViewModel.FamilyConfig>,
     currentPaid: Set<Int>,
+    useFixedPortion: Boolean,
     customAmounts: Map<String, Double> = emptyMap(),
     onTogglePaid: (Int, Boolean) -> Unit
 ) {
@@ -1673,7 +1728,9 @@ fun FamilyDistributionGrid(
                             val familyName = family.name
                             val customAmount = customAmounts["${weekKey}_${family.id}"]
                             val hasCustom = customAmount != null
-                            val familyShare = customAmount ?: family.portion
+                            val familyShare = if (family.portion <= 0) 0.0 else {
+                                customAmount ?: (if (useFixedPortion) family.portion else sharePerFamily)
+                            }
 
                             Box(
                                 modifier = Modifier
@@ -1748,6 +1805,7 @@ fun WeeklySummaryCard(
     families: List<AppViewModel.FamilyConfig>,
     currentPaid: Set<Int>,
     isReported: Boolean,
+    useFixedPortion: Boolean,
     customAmounts: Map<String, Double> = emptyMap(),
     onTogglePaid: (Int, Boolean) -> Unit,
     onGenerateReport: () -> Unit,
@@ -1966,8 +2024,14 @@ fun WeeklySummaryCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val activeFamiliesCount = families.count { it.portion > 0 }
+                    val defaultFamilyShare = if (useFixedPortion) 0.0 else {
+                        if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
+                    }
                     val totalActivePayout = families.sumOf { family ->
-                        customAmounts["${summary.weekKey}_${family.id}"] ?: family.portion
+                        if (family.portion <= 0) 0.0 else {
+                            customAmounts["${summary.weekKey}_${family.id}"] ?: (if (useFixedPortion) family.portion else defaultFamilyShare)
+                        }
                     }
                     Text(
                         text = "إجمالي أنصبة الأسر المحددة للأسبوع:",
@@ -1991,6 +2055,7 @@ fun WeeklySummaryCard(
             sharePerFamily = summary.sharePerFamily,
             families = families,
             currentPaid = currentPaid,
+            useFixedPortion = useFixedPortion,
             customAmounts = customAmounts,
             onTogglePaid = onTogglePaid
         )
@@ -4138,7 +4203,16 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                                 )
                             }
                             Column(modifier = Modifier.weight(1f)) {
-                                val totalActivePayout = families.filter { it.portion > 0 }.sumOf { it.portion }
+                                val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
+                                val activeFamiliesCount = families.count { it.portion > 0 }
+                                val defaultFamilyShare = if (weekUseFixedPortion) 0.0 else {
+                                    if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
+                                }
+                                val totalActivePayout = families.sumOf { family ->
+                                    if (family.portion <= 0) 0.0 else {
+                                        customAmounts["${summary.weekKey}_${family.id}"] ?: (if (weekUseFixedPortion) family.portion else defaultFamilyShare)
+                                    }
+                                }
                                 Text(
                                     text = "إجمالي أنصبة الأسر:",
                                     style = MaterialTheme.typography.labelSmall,
@@ -4173,11 +4247,18 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                                     )
                                 } else {
                                     val currentPaid = paidFamiliesMap[summary.weekKey] ?: emptySet()
+                                    val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
+                                    val activeFamiliesCount = families.count { it.portion > 0 }
+                                    val defaultFamilyShare = if (weekUseFixedPortion) 0.0 else {
+                                        if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
+                                    }
                                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         families.forEach { family ->
                                             val customAmount = customAmounts["${summary.weekKey}_${family.id}"]
                                             val hasCustom = customAmount != null
-                                            val familyShare = customAmount ?: family.portion
+                                            val familyShare = if (family.portion <= 0) 0.0 else {
+                                                customAmount ?: (if (weekUseFixedPortion) family.portion else defaultFamilyShare)
+                                            }
                                             val isPaid = currentPaid.contains(family.id)
 
                                             Row(
@@ -4224,7 +4305,11 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                                                         text = if (hasCustom) {
                                                             "نصيب مخصص: ${String.format(Locale.US, "%,.0f SDG", familyShare)} (اضغط للتعديل)"
                                                         } else {
-                                                            "النصيب المحدد: ${String.format(Locale.US, "%,.0f SDG", family.portion)} (اضغط للتخصيص)"
+                                                            if (weekUseFixedPortion) {
+                                                                "النصيب المحدد: ${String.format(Locale.US, "%,.0f SDG", family.portion)} (اضغط للتخصيص)"
+                                                            } else {
+                                                                "النصيب بالتساوي: ${String.format(Locale.US, "%,.0f SDG", defaultFamilyShare)} (اضغط للتخصيص)"
+                                                            }
                                                         },
                                                         style = MaterialTheme.typography.labelSmall,
                                                         color = if (hasCustom) Color(0xFFD97706) else Color(0xFF0061A4),
