@@ -1346,7 +1346,7 @@ fun DashboardScreen(
             val isFamilyActive = family.portion > 0 || isCustomActive
             if (isFamilyActive && paidIds.contains(family.id)) {
                 val familyShare = if (family.portion <= 0) 0.0 else {
-                    customAmount ?: (if (weekUseFixedPortion) family.portion else defaultFamilyShare)
+                    customAmount ?: (if (weekUseFixedPortion) (family.portion * summary.sharePerFamily) else defaultFamilyShare)
                 }
                 grandTotalPaidToFamilies += familyShare
             }
@@ -1729,7 +1729,7 @@ fun FamilyDistributionGrid(
                             val customAmount = customAmounts["${weekKey}_${family.id}"]
                             val hasCustom = customAmount != null
                             val familyShare = if (family.portion <= 0) 0.0 else {
-                                customAmount ?: (if (useFixedPortion) family.portion else sharePerFamily)
+                                customAmount ?: (if (useFixedPortion) (family.portion * sharePerFamily) else sharePerFamily)
                             }
 
                             Box(
@@ -2030,7 +2030,7 @@ fun WeeklySummaryCard(
                     }
                     val totalActivePayout = families.sumOf { family ->
                         if (family.portion <= 0) 0.0 else {
-                            customAmounts["${summary.weekKey}_${family.id}"] ?: (if (useFixedPortion) family.portion else defaultFamilyShare)
+                            customAmounts["${summary.weekKey}_${family.id}"] ?: (if (useFixedPortion) (family.portion * summary.sharePerFamily) else defaultFamilyShare)
                         }
                     }
                     Text(
@@ -2432,16 +2432,20 @@ fun RickshawRevenuesScreen(
     onViewImage: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val families by viewModel.familiesState.collectAsState()
+    val useFixedPortion by viewModel.useFixedPortionState.collectAsState()
+    val reportedWeeks by viewModel.reportedWeeksState.collectAsState()
 
     // Forms fields
-    var selectedRickshaw by remember { mutableStateOf<Rickshaw?>(null) }
-    var rickshawAmount by remember { mutableStateOf("") }
+    var rickshawAmounts by remember { mutableStateOf<Map<Int, String>>(emptyMap()) }
     var rickshawNotes by remember { mutableStateOf("") }
     var rickshawDate by remember { mutableStateOf(System.currentTimeMillis()) }
     var rickshawScreenshotUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
 
     // Dialog state
     var showRickshawsEditDialog by remember { mutableStateOf(false) }
+    var pendingRevenuesToSave by remember { mutableStateOf<List<Pair<Int, Double>>?>(null) }
+    var showFamilySharesDialog by remember { mutableStateOf(false) }
 
     // Setup photo picker
     val rickshawPhotoPicker = rememberLauncherForActivityResult(
@@ -2468,13 +2472,13 @@ fun RickshawRevenuesScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "تسجيل إيراد ركشة أسبوعي",
+                            text = "تسجيل إيرادات الركشات الأسبوعية",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
                         )
 
-                        // Fleet management settings button (just like family settings!)
+                        // Fleet management settings button
                         Button(
                             onClick = { showRickshawsEditDialog = true },
                             colors = ButtonDefaults.buttonColors(
@@ -2495,66 +2499,69 @@ fun RickshawRevenuesScreen(
                         }
                     }
 
-                    // Fleet Quick Selection
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        var dropdownExpanded by remember { mutableStateOf(false) }
-                        Box(modifier = Modifier.weight(1f)) {
+                    // Loop through all registered rickshaws and show input fields
+                    if (rickshaws.isEmpty()) {
+                        Text(
+                            text = "لا توجد ركشات مضافة حالياً. الرجاء إضافة ركشة أولاً من زر 'إدارة الأسطول'.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    } else {
+                        Text(
+                            text = "الرجاء إدخال إيراد كل ركشة نشطة لهذا الأسبوع:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        
+                        rickshaws.forEach { r ->
+                            val amtText = rickshawAmounts[r.id] ?: ""
                             OutlinedTextField(
-                                value = selectedRickshaw?.name ?: "اختر الركشة...",
-                                onValueChange = {},
-                                readOnly = true,
-                                label = { Text("الركشة") },
-                                trailingIcon = {
-                                    IconButton(onClick = { dropdownExpanded = true }) {
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                value = amtText,
+                                onValueChange = { newValue ->
+                                    rickshawAmounts = rickshawAmounts.toMutableMap().apply {
+                                        put(r.id, newValue)
                                     }
                                 },
-                                modifier = Modifier.fillMaxWidth().testTag("rickshaw_dropdown"),
-                                shape = RoundedCornerShape(12.dp)
+                                label = { Text("إيراد ${r.name} (السائق: ${r.driverName})") },
+                                placeholder = { Text("0 SDG") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth().testTag("rickshaw_amount_${r.id}"),
+                                shape = RoundedCornerShape(12.dp),
+                                leadingIcon = {
+                                    Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                }
                             )
-                            DropdownMenu(
-                                expanded = dropdownExpanded,
-                                onDismissRequest = { dropdownExpanded = false }
+                        }
+
+                        // Display dynamic aggregated total
+                        val totalAggregatedRevenue = rickshaws.sumOf { r ->
+                            rickshawAmounts[r.id]?.toDoubleOrNull() ?: 0.0
+                        }
+
+                        if (totalAggregatedRevenue > 0) {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)),
+                                shape = RoundedCornerShape(12.dp)
                             ) {
-                                if (rickshaws.isEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("لا يوجد ركشات، أضف ركشة أولاً") },
-                                        onClick = { dropdownExpanded = false }
-                                    )
-                                } else {
-                                    rickshaws.forEach { r ->
-                                        DropdownMenuItem(
-                                            text = { Text("${r.name} - ${r.driverName}") },
-                                            onClick = {
-                                                selectedRickshaw = r
-                                                dropdownExpanded = false
-                                            }
-                                        )
-                                    }
+                                Row(
+                                    modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("إجمالي الإيرادات المجمعة للركشات:", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E40AF))
+                                    Text("${String.format(Locale.US, "%,.0f", totalAggregatedRevenue)} SDG", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = Color(0xFF1D4ED8))
                                 }
                             }
                         }
                     }
 
-                    // Amount
-                    OutlinedTextField(
-                        value = rickshawAmount,
-                        onValueChange = { rickshawAmount = it },
-                        label = { Text("المبلغ بالإيراد (SDG)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth().testTag("rickshaw_amount"),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
                     // Notes
                     OutlinedTextField(
                         value = rickshawNotes,
                         onValueChange = { rickshawNotes = it },
-                        label = { Text("ملاحظات (الأسبوع، تفاصيل...)") },
+                        label = { Text("ملاحظات إضافية...") },
                         modifier = Modifier.fillMaxWidth().testTag("rickshaw_notes"),
                         shape = RoundedCornerShape(12.dp)
                     )
@@ -2582,30 +2589,42 @@ fun RickshawRevenuesScreen(
                     // Submit Button
                     Button(
                         onClick = {
-                            val amt = rickshawAmount.toDoubleOrNull()
-                            if (selectedRickshaw == null) {
-                                Toast.makeText(context, "الرجاء اختيار ركشة", Toast.LENGTH_SHORT).show()
-                            } else if (amt == null || amt <= 0) {
-                                Toast.makeText(context, "الرجاء إدخال مبلغ صحيح", Toast.LENGTH_SHORT).show()
+                            val revenuesList = rickshaws.mapNotNull { r ->
+                                val amt = rickshawAmounts[r.id]?.toDoubleOrNull()
+                                if (amt != null && amt > 0) r.id to amt else null
+                            }
+                            
+                            if (revenuesList.isEmpty()) {
+                                Toast.makeText(context, "الرجاء إدخال مبلغ إيراد صحيح لركشة واحدة على الأقل!", Toast.LENGTH_SHORT).show()
                             } else {
-                                viewModel.addRickshawRevenue(
-                                    rickshawId = selectedRickshaw!!.id,
-                                    amount = amt,
-                                    date = rickshawDate,
-                                    notes = rickshawNotes,
-                                    screenshotUris = rickshawScreenshotUris
-                                )
-                                Toast.makeText(context, "تم حفظ الإيراد أسبوعياً بنجاح", Toast.LENGTH_SHORT).show()
-                                // Reset fields
-                                rickshawAmount = ""
-                                rickshawNotes = ""
-                                rickshawScreenshotUris = emptyList()
+                                val weekKey = AppViewModel.getWeekRangeString(rickshawDate)
+                                if (!useFixedPortion) {
+                                    // Manual share entry flow
+                                    pendingRevenuesToSave = revenuesList
+                                    showFamilySharesDialog = true
+                                } else {
+                                    // Automatic fixed portion flow
+                                    viewModel.saveRickshawRevenuesAndDistribute(
+                                        weekKey = weekKey,
+                                        revenues = revenuesList,
+                                        date = rickshawDate,
+                                        notes = rickshawNotes,
+                                        screenshotUris = rickshawScreenshotUris,
+                                        customShares = null
+                                    )
+                                    Toast.makeText(context, "تم حفظ الإيرادات وحساب الأنصبة المحددة تلقائياً بنجاح!", Toast.LENGTH_LONG).show()
+                                    // Reset fields
+                                    rickshawAmounts = emptyMap()
+                                    rickshawNotes = ""
+                                    rickshawScreenshotUris = emptyList()
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth().height(48.dp).testTag("save_rickshaw_revenue"),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("حفظ الإيراد وتوزيعه", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        val btnText = if (!useFixedPortion) "حفظ الإيرادات وتوزيع الأنصبة يدوياً" else "حفظ الإيرادات وتوزيعها تلقائياً"
+                        Text(btnText, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     }
                 }
             }
@@ -2631,14 +2650,38 @@ fun RickshawRevenuesScreen(
             }
         } else {
             items(weeklySummaries) { summary ->
+                val isReported = reportedWeeks.contains(summary.weekKey)
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text(summary.weekKey, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(summary.weekKey, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                            
+                            // Status Badge
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isReported) Color(0xFFDCFCE7) else Color(0xFFFEF3C7))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = if (isReported) "تم التوزيع والترحيل" else "قيد التوزيع والانتظار",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isReported) Color(0xFF15803D) else Color(0xFFB45309)
+                                )
+                            }
+                        }
+                        
                         Divider(modifier = Modifier.padding(vertical = 6.dp))
+                        
                         summary.revenues.forEach { rev ->
                             val rName = rickshaws.find { it.id == rev.rickshawId }?.name ?: "ركشة غير معروفة"
                             Row(
@@ -2667,6 +2710,27 @@ fun RickshawRevenuesScreen(
                                 }
                             }
                         }
+
+                        // Reopen Button
+                        if (isReported) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(
+                                onClick = {
+                                    viewModel.reopenWeekForEditing(summary.weekKey)
+                                    Toast.makeText(context, "تم إعادة فتح الأسبوع لتعديل التوزيع وإعادة التسجيل!", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFFEE2E2),
+                                    contentColor = Color(0xFFDC2626)
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth().height(36.dp)
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("إعادة فتح الأسبوع للتعديل والتوزيع", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
             }
@@ -2681,6 +2745,192 @@ fun RickshawRevenuesScreen(
             onUpdateRickshaw = { r -> viewModel.updateRickshaw(r) },
             onDeleteRickshaw = { r -> viewModel.deleteRickshaw(r) }
         )
+    }
+
+    if (showFamilySharesDialog && pendingRevenuesToSave != null) {
+        FamilySharesInputDialog(
+            families = families,
+            totalRevenue = pendingRevenuesToSave!!.sumOf { it.second },
+            onDismiss = {
+                showFamilySharesDialog = false
+                pendingRevenuesToSave = null
+            },
+            onConfirm = { customSharesMap ->
+                val weekKey = AppViewModel.getWeekRangeString(rickshawDate)
+                viewModel.saveRickshawRevenuesAndDistribute(
+                    weekKey = weekKey,
+                    revenues = pendingRevenuesToSave!!,
+                    date = rickshawDate,
+                    notes = rickshawNotes,
+                    screenshotUris = rickshawScreenshotUris,
+                    customShares = customSharesMap
+                )
+                Toast.makeText(context, "تم تسجيل الإيرادات وتوزيع الأنصبة المخصصة للأسر بنجاح!", Toast.LENGTH_LONG).show()
+                // Reset fields
+                rickshawAmounts = emptyMap()
+                rickshawNotes = ""
+                rickshawScreenshotUris = emptyList()
+                showFamilySharesDialog = false
+                pendingRevenuesToSave = null
+            }
+        )
+    }
+}
+
+@Composable
+fun FamilySharesInputDialog(
+    families: List<AppViewModel.FamilyConfig>,
+    totalRevenue: Double,
+    onDismiss: () -> Unit,
+    onConfirm: (Map<Int, Double>) -> Unit
+) {
+    var familyShares by remember {
+        mutableStateOf(
+            families.associate { it.id to "" }
+        )
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp)
+                .heightIn(max = 560.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = "توزيع الأنصبة على الأسر للأسبوع",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0061A4),
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Start
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "صافي الإيراد المجمع للركشات: ${String.format(Locale.US, "%,.0f", totalRevenue)} SDG. الرجاء إدخال نصيب (مبلغ بالجنيه) كل أسرة نشطة من هذا الإيراد:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF44474E),
+                    modifier = Modifier.fillMaxWidth(),
+                    fontSize = 11.sp
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Scrollable list of active families
+                val activeFamilies = families.filter { it.portion > 0 }
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (activeFamilies.isEmpty()) {
+                        Text(
+                            text = "لا توجد أسر نشطة مضافة في النظام حالياً! يرجى إضافتها أولاً من صفحة إدارة الأسر.",
+                            color = Color.Red,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    } else {
+                        activeFamilies.forEach { family ->
+                            val shareText = familyShares[family.id] ?: ""
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFFF1F5F9), RoundedCornerShape(12.dp))
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Text(
+                                    text = family.name,
+                                    modifier = Modifier.weight(1.2f),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = Color(0xFF1E293B)
+                                )
+                                OutlinedTextField(
+                                    value = shareText,
+                                    onValueChange = { newValue ->
+                                        familyShares = familyShares.toMutableMap().apply {
+                                            put(family.id, newValue)
+                                        }
+                                    },
+                                    placeholder = { Text("0 SDG", fontSize = 11.sp, color = Color(0xFF64748B)) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.weight(1.1f).height(48.dp),
+                                    singleLine = true,
+                                    textStyle = androidx.compose.ui.text.TextStyle(
+                                        color = Color(0xFF1B1B1F),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = Color(0xFF1B1B1F),
+                                        unfocusedTextColor = Color(0xFF1B1B1F),
+                                        focusedContainerColor = Color.White,
+                                        unfocusedContainerColor = Color.White,
+                                        focusedBorderColor = Color(0xFF0061A4),
+                                        unfocusedBorderColor = Color(0xFFCBD5E1)
+                                    ),
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Dynamic sum of distributed shares
+                val totalDistributedShares = activeFamilies.sumOf { family ->
+                    familyShares[family.id]?.toDoubleOrNull() ?: 0.0
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFFFEF3C7), RoundedCornerShape(10.dp))
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("إجمالي الموزع للأسر:", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFB45309))
+                    Text("${String.format(Locale.US, "%,.0f", totalDistributedShares)} SDG", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFFB45309))
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("إلغاء")
+                    }
+                    Button(
+                        onClick = {
+                            val map = activeFamilies.associate { family ->
+                                family.id to (familyShares[family.id]?.toDoubleOrNull() ?: 0.0)
+                            }
+                            onConfirm(map)
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("تأكيد التوزيع والحفظ")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2748,8 +2998,8 @@ fun ShopRevenuesScreen(
                         shape = RoundedCornerShape(12.dp)
                     )
 
-                    // Past/Custom Date Selector
-                    PastDateSelector(
+                    // Past/Custom Month Selector
+                    PastMonthSelector(
                         selectedDate = shopDate,
                         onDateSelected = { shopDate = it }
                     )
@@ -3829,14 +4079,10 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
     val savedBalances by viewModel.familySavedBalancesState.collectAsState()
     val weeklySummaries by viewModel.weeklyRickshawSummaries.collectAsState()
     val reportedWeeks by viewModel.reportedWeeksState.collectAsState()
-    val paidFamiliesMap by viewModel.paidFamiliesMapState.collectAsState()
     val customAmounts by viewModel.familyCustomAmountsState.collectAsState()
 
     var selectedFamilyForPay by remember { mutableStateOf<AppViewModel.FamilyConfig?>(null) }
     var payAmount by remember { mutableStateOf("") }
-    
-    var selectedFamilyForCustomAmount by remember { mutableStateOf<Pair<AppViewModel.WeeklySummary, AppViewModel.FamilyConfig>?>(null) }
-    var customAmountText by remember { mutableStateOf("") }
     val context = LocalContext.current
 
     // Expanded states for weekly summaries - collapses older weeks, expands current/active week by default
@@ -4083,7 +4329,7 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
             ) {
                 Icon(Icons.Default.DateRange, contentDescription = null, tint = Color(0xFF0061A4), modifier = Modifier.size(20.dp))
                 Text(
-                    text = "متابعة وإغلاق الأسابيع",
+                    text = "حصص وأنصبة الأسر لكل أسبوع (عرض فقط)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground
@@ -4094,13 +4340,12 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
         if (weeklySummaries.isEmpty()) {
             item {
                 EmptyStateCard(
-                    message = "لا توجد أسابيع مسجلة بعد لتسويتها.",
+                    message = "لا توجد أسابيع مسجلة بعد لعرض الأنصبة.",
                     icon = Icons.Default.DateRange
                 )
             }
         } else {
             items(weeklySummaries) { summary ->
-                val isReported = reportedWeeks.contains(summary.weekKey)
                 val isExpanded = expandedWeeks.contains(summary.weekKey)
 
                 Card(
@@ -4109,15 +4354,10 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                         .testTag("week_settlement_card_${summary.weekKey}"),
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (isReported) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f) 
-                                         else MaterialTheme.colorScheme.surface
+                        containerColor = MaterialTheme.colorScheme.surface
                     ),
                     elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                    border = BorderStroke(
-                        1.dp, 
-                        if (isReported) MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f) 
-                        else MaterialTheme.colorScheme.outlineVariant
-                    )
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Column(
                         modifier = Modifier.padding(16.dp),
@@ -4140,45 +4380,21 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                                 Box(
                                     modifier = Modifier
                                         .size(10.dp)
-                                        .background(
-                                            if (isReported) Color.Gray else Color(0xFF0061A4), 
-                                            CircleShape
-                                        )
+                                        .background(Color(0xFF0061A4), CircleShape)
                                 )
                                 Text(
                                     text = "الأسبوع: ${summary.weekKey}",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isReported) Color.Gray else MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                             
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            if (isReported) Color(0xFFE8F0FE).copy(alpha = 0.5f) else Color(0xFFFEF3C7),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text(
-                                        text = if (isReported) "تمت التسوية والتقرير" else "قيد التوزيع والتسوية",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isReported) Color(0xFF0061A4).copy(alpha = 0.6f) else Color(0xFFB45309)
-                                    )
-                                }
-                                
-                                Icon(
-                                    imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                    contentDescription = if (isExpanded) "إغلاق" else "عرض المزيد",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (isExpanded) "إغلاق" else "عرض المزيد",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
 
                         // Summary Statistics Row (Always visible)
@@ -4191,12 +4407,12 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "صافي ربح الركشات:",
+                                    text = "إجمالي إيرادات الركشات:",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Text(
-                                    text = String.format(Locale.US, "%,.0f SDG", summary.netRevenue),
+                                    text = String.format(Locale.US, "%,.0f SDG", summary.totalRevenue),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
@@ -4204,284 +4420,82 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
-                                val activeFamiliesCount = families.count { it.portion > 0 }
-                                val defaultFamilyShare = if (weekUseFixedPortion) 0.0 else {
-                                    if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
-                                }
-                                val totalActivePayout = families.sumOf { family ->
-                                    if (family.portion <= 0) 0.0 else {
-                                        customAmounts["${summary.weekKey}_${family.id}"] ?: (if (weekUseFixedPortion) family.portion else defaultFamilyShare)
-                                    }
-                                }
                                 Text(
-                                    text = "إجمالي أنصبة الأسر:",
+                                    text = "آلية التوزيع:",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Text(
-                                    text = String.format(Locale.US, "%,.0f SDG", totalActivePayout),
+                                    text = if (weekUseFixedPortion) "النسب المحددة تلقائياً" else "مبالغ مخصصة / بالتساوي",
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = Color(0xFF0F766E)
                                 )
                             }
                         }
 
-                        // Expandable Content
+                        // Expanded view displaying the list of active families and their exact share
                         if (isExpanded) {
-                            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            Divider()
+                            
+                            val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
+                            val activeFamiliesCount = families.count { it.portion > 0 }
+                            val defaultFamilyShare = if (weekUseFixedPortion) 0.0 else {
+                                if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
+                            }
 
-                            if (!isReported) {
-                                Text(
-                                    text = "حدد طريقة التوزيع لكل عائلة (اضغط للتعديل أو تخصيص مبلغ معين):",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                            Text(
+                                text = "توزيع الحصص والأنصبة للأسر لهذا الأسبوع:",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
 
-                                if (families.isEmpty()) {
-                                    Text(
-                                        text = "لا توجد أسر مضافة.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.error
-                                    )
-                                } else {
-                                    val currentPaid = paidFamiliesMap[summary.weekKey] ?: emptySet()
-                                    val weekUseFixedPortion = viewModel.getUseFixedPortionForWeek(summary.weekKey)
-                                    val activeFamiliesCount = families.count { it.portion > 0 }
-                                    val defaultFamilyShare = if (weekUseFixedPortion) 0.0 else {
-                                        if (summary.netRevenue > 0 && activeFamiliesCount > 0) summary.netRevenue / activeFamiliesCount else 0.0
+                            val activeFamilies = families.filter { 
+                                it.portion > 0 || (customAmounts["${summary.weekKey}_${it.id}"] ?: 0.0) > 0.0 
+                            }
+
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                activeFamilies.forEach { family ->
+                                    val customAmount = customAmounts["${summary.weekKey}_${family.id}"]
+                                    val hasCustom = customAmount != null
+                                    
+                                    val familyShare = if (family.portion <= 0) 0.0 else {
+                                        customAmount ?: (if (weekUseFixedPortion) (family.portion * summary.sharePerFamily) else defaultFamilyShare)
                                     }
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        families.forEach { family ->
-                                            val customAmount = customAmounts["${summary.weekKey}_${family.id}"]
-                                            val hasCustom = customAmount != null
-                                            val familyShare = if (family.portion <= 0) 0.0 else {
-                                                customAmount ?: (if (weekUseFixedPortion) family.portion else defaultFamilyShare)
-                                            }
-                                            val isPaid = currentPaid.contains(family.id)
 
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .border(
-                                                        1.dp,
-                                                        if (hasCustom) Color(0xFFF59E0B).copy(alpha = 0.5f)
-                                                        else MaterialTheme.colorScheme.outlineVariant,
-                                                        RoundedCornerShape(12.dp)
-                                                    )
-                                                    .background(
-                                                        if (hasCustom) Color(0xFFFFFBEB)
-                                                        else Color.Transparent,
-                                                        RoundedCornerShape(12.dp)
-                                                    )
-                                                    .clickable {
-                                                        selectedFamilyForCustomAmount = summary to family
-                                                        customAmountText = if (hasCustom) familyShare.toString() else ""
-                                                    }
-                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                                    ) {
-                                                        Text(
-                                                            text = family.name,
-                                                            style = MaterialTheme.typography.bodyMedium,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = MaterialTheme.colorScheme.onSurface
-                                                        )
-                                                        Icon(
-                                                            imageVector = Icons.Default.Edit,
-                                                            contentDescription = "تخصيص مبلغ",
-                                                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                                                            modifier = Modifier.size(14.dp)
-                                                        )
-                                                    }
-                                                    Text(
-                                                        text = if (hasCustom) {
-                                                            "نصيب مخصص: ${String.format(Locale.US, "%,.0f SDG", familyShare)} (اضغط للتعديل)"
-                                                        } else {
-                                                            if (weekUseFixedPortion) {
-                                                                "النصيب المحدد: ${String.format(Locale.US, "%,.0f SDG", family.portion)} (اضغط للتخصيص)"
-                                                            } else {
-                                                                "النصيب بالتساوي: ${String.format(Locale.US, "%,.0f SDG", defaultFamilyShare)} (اضغط للتخصيص)"
-                                                            }
-                                                        },
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = if (hasCustom) Color(0xFFD97706) else Color(0xFF0061A4),
-                                                        fontWeight = FontWeight.Medium
-                                                    )
-                                                }
-
-                                                // Toggle selector buttons: [دفع] [حفظ]
-                                                Row(
-                                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    // Pay button (دفع فوراً)
-                                                    val paySelected = isPaid
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .clip(CircleShape)
-                                                            .background(
-                                                                if (paySelected) Color(0xFFDCFCE7) else Color(0xFFF1F5F9)
-                                                            )
-                                                            .border(
-                                                                1.dp,
-                                                                if (paySelected) Color(0xFF22C55E) else Color.Transparent,
-                                                                CircleShape
-                                                            )
-                                                            .clickable {
-                                                                viewModel.toggleFamilyPayment(summary.weekKey, family.id, true)
-                                                            }
-                                                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                                                    ) {
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = Icons.Default.Check,
-                                                                contentDescription = null,
-                                                                tint = if (paySelected) Color(0xFF15803D) else Color.Gray,
-                                                                modifier = Modifier.size(12.dp)
-                                                            )
-                                                            Text(
-                                                                text = "دفع فوراً",
-                                                                fontSize = 10.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = if (paySelected) Color(0xFF15803D) else Color.Gray
-                                                            )
-                                                        }
-                                                    }
-
-                                                    // Save button (حفظ للرصيد)
-                                                    val saveSelected = !isPaid
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .clip(CircleShape)
-                                                            .background(
-                                                                if (saveSelected) Color(0xFFFEF3C7) else Color(0xFFF1F5F9)
-                                                            )
-                                                            .border(
-                                                                1.dp,
-                                                                if (saveSelected) Color(0xFFF59E0B) else Color.Transparent,
-                                                                CircleShape
-                                                            )
-                                                            .clickable {
-                                                                viewModel.toggleFamilyPayment(summary.weekKey, family.id, false)
-                                                            }
-                                                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                                                    ) {
-                                                        Row(
-                                                            verticalAlignment = Alignment.CenterVertically,
-                                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = Icons.Default.Save,
-                                                                contentDescription = null,
-                                                                tint = if (saveSelected) Color(0xFFB45309) else Color.Gray,
-                                                                modifier = Modifier.size(12.dp)
-                                                            )
-                                                            Text(
-                                                                text = "حفظ للرصيد",
-                                                                fontSize = 10.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = if (saveSelected) Color(0xFFB45309) else Color.Gray
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(
+                                                if (hasCustom) Color(0xFFFFFBEB)
+                                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = family.name,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = if (hasCustom) "نصيب مخصص من المستخدم" else if (weekUseFixedPortion) "نصيب محدد مسبقاً تلقائي" else "موزع بالتساوي",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
                                         }
-                                    }
-                                }
 
-                                Spacer(modifier = Modifier.height(8.dp))
-
-                                // Save and Generate Report Button
-                                Button(
-                                    onClick = {
-                                        viewModel.generateWeeklyDistributionReport(summary)
-                                        Toast.makeText(context, "تم حفظ توزيع الأسبوع وتوليد تقرير إحصائي للمستندات!", Toast.LENGTH_LONG).show()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF0F766E), // Teal-700
-                                        contentColor = Color.White
-                                    ),
-                                    shape = RoundedCornerShape(12.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(44.dp)
-                                        .testTag("save_and_report_btn_${summary.weekKey}")
-                                ) {
-                                    Icon(Icons.Default.DoneAll, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("حفظ وإغلاق الأسبوع النهائي للتوزيع", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                            } else {
-                                // If reported, we show a clean summary of what happened
-                                Text(
-                                    text = "حالة الاستلام والتوزيع المسجلة:",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                
-                                val currentPaid = paidFamiliesMap[summary.weekKey] ?: emptySet()
-                                val activeFamilies = families.filter { 
-                                    it.portion > 0 || (customAmounts["${summary.weekKey}_${it.id}"] ?: 0.0) > 0.0 
-                                }
-                                
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    activeFamilies.forEach { family ->
-                                        val isPaid = currentPaid.contains(family.id)
-                                        val customAmount = customAmounts["${summary.weekKey}_${family.id}"]
-                                        val familyShare = customAmount ?: family.portion
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
-                                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column {
-                                                Text(
-                                                    text = family.name,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurface,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                                Text(
-                                                    text = "المبلغ الموزع: ${String.format(Locale.US, "%,.0f SDG", familyShare)}",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = Color(0xFF0F766E)
-                                                )
-                                            }
-                                            
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = if (isPaid) Icons.Default.CheckCircle else Icons.Default.AccountBalanceWallet,
-                                                    contentDescription = null,
-                                                    tint = if (isPaid) Color(0xFF15803D) else Color(0xFFB45309),
-                                                    modifier = Modifier.size(14.dp)
-                                                )
-                                                Text(
-                                                    text = if (isPaid) "تم الاستلام نقدًا" else "تم الترحيل للرصيد المحفوظ",
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = if (isPaid) Color(0xFF15803D) else Color(0xFFB45309)
-                                                )
-                                            }
-                                        }
+                                        Text(
+                                            text = String.format(Locale.US, "%,.0f SDG", familyShare),
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color(0xFF0F766E)
+                                        )
                                     }
                                 }
                             }
@@ -4503,17 +4517,17 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Right
+                    textAlign = TextAlign.Start
                 )
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "الرصيد المحفوظ المتوفر: ${String.format(Locale.US, "%,.2f SDG", balance)}",
+                        text = "الرصيد المحفوظ المتوفر: ${String.format(Locale.US, "%,.0f SDG", balance)}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Right
+                        textAlign = TextAlign.Start
                     )
                     OutlinedTextField(
                         value = payAmount,
@@ -4547,135 +4561,6 @@ fun FamilyDistributionsScreen(viewModel: AppViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { selectedFamilyForPay = null }) {
-                    Text("إلغاء")
-                }
-            }
-        )
-    }
-
-    // Custom Amount Setup Dialog
-    selectedFamilyForCustomAmount?.let { (summary, family) ->
-        val customAmount = customAmounts["${summary.weekKey}_${family.id}"]
-        val hasCustom = customAmount != null
-        AlertDialog(
-            onDismissRequest = { selectedFamilyForCustomAmount = null },
-            title = {
-                Text(
-                    text = "تخصيص نصيب ${family.name}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Right
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "النصيب الافتراضي العام: ${String.format(Locale.US, "%,.0f SDG", family.portion)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Right
-                    )
-                    if (hasCustom) {
-                        Text(
-                            text = "النصيب المخصص الحالي: ${String.format(Locale.US, "%,.0f SDG", customAmount)}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.fillMaxWidth(),
-                            textAlign = TextAlign.Right
-                        )
-                    }
-                    OutlinedTextField(
-                        value = customAmountText,
-                        onValueChange = { customAmountText = it },
-                        label = { Text("المبلغ المخصص لهذا الأسبوع") },
-                        placeholder = { Text("مثال: 15000") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "اختر طريقة حفظ النصيب المخصص:",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Right
-                    )
-
-                    // Option 1: حفظ وتسليم المبلغ
-                    Button(
-                        onClick = {
-                            val amount = customAmountText.toDoubleOrNull()
-                            if (amount == null || amount < 0) {
-                                Toast.makeText(context, "الرجاء إدخال مبلغ صحيح", Toast.LENGTH_SHORT).show()
-                            } else {
-                                viewModel.setFamilyCustomAmount(summary.weekKey, family.id, amount)
-                                viewModel.toggleFamilyPayment(summary.weekKey, family.id, true)
-                                Toast.makeText(context, "تم تخصيص وتسليم المبلغ: $amount SDG", Toast.LENGTH_SHORT).show()
-                                selectedFamilyForCustomAmount = null
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)), // Green for Cash out
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                            Text("حفظ وتسليم المبلغ نقدًا", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                    }
-
-                    // Option 2: حفظ المبلغ في الرصيد
-                    Button(
-                        onClick = {
-                            val amount = customAmountText.toDoubleOrNull()
-                            if (amount == null || amount < 0) {
-                                Toast.makeText(context, "الرجاء إدخال مبلغ صحيح", Toast.LENGTH_SHORT).show()
-                            } else {
-                                viewModel.setFamilyCustomAmount(summary.weekKey, family.id, amount)
-                                viewModel.toggleFamilyPayment(summary.weekKey, family.id, false)
-                                Toast.makeText(context, "تم تخصيص وحفظ المبلغ في الرصيد: $amount SDG", Toast.LENGTH_SHORT).show()
-                                selectedFamilyForCustomAmount = null
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE65100)), // Orange for saved balance
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(Icons.Default.AccountBalanceWallet, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                            Text("حفظ المبلغ في الرصيد", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                if (hasCustom) {
-                    TextButton(
-                        onClick = {
-                            viewModel.setFamilyCustomAmount(summary.weekKey, family.id, null)
-                            Toast.makeText(context, "تمت استعادة النصيب الافتراضي", Toast.LENGTH_SHORT).show()
-                            selectedFamilyForCustomAmount = null
-                        },
-                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Text("إلغاء التخصيص")
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { selectedFamilyForCustomAmount = null }) {
                     Text("إلغاء")
                 }
             }
@@ -4828,8 +4713,8 @@ fun RoomRevenuesScreen(
                         shape = RoundedCornerShape(12.dp)
                     )
 
-                    // Past/Custom Date Selector
-                    PastDateSelector(
+                    // Past/Custom Month Selector
+                    PastMonthSelector(
                         selectedDate = roomDate,
                         onDateSelected = { roomDate = it }
                     )
@@ -5026,6 +4911,313 @@ fun RoomRevenuesScreen(
             onUpdateRoom = { r -> viewModel.updateRoom(r) },
             onDeleteRoom = { r -> viewModel.deleteRoom(r) }
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PastMonthSelector(
+    selectedDate: Long,
+    onDateSelected: (Long) -> Unit
+) {
+    var isCustomMonthEnabled by remember { mutableStateOf(false) }
+
+    // Month options list (relative offsets in months)
+    val monthOffsets = remember {
+        listOf(
+            "الشهر الحالي" to 0,
+            "الشهر الماضي (الشهر الفائت)" to 1,
+            "قبل شهرين" to 2,
+            "قبل 3 أشهر" to 3,
+            "قبل 4 أشهر" to 4,
+            "قبل 5 أشهر" to 5,
+            "قبل 6 أشهر" to 6
+        )
+    }
+
+    // List of months for custom selection
+    val arabicMonths = remember {
+        listOf(
+            "يناير" to Calendar.JANUARY,
+            "فبراير" to Calendar.FEBRUARY,
+            "مارس" to Calendar.MARCH,
+            "أبريل" to Calendar.APRIL,
+            "مايو" to Calendar.MAY,
+            "يونيو" to Calendar.JUNE,
+            "يوليو" to Calendar.JULY,
+            "أغسطس" to Calendar.AUGUST,
+            "سبتمبر" to Calendar.SEPTEMBER,
+            "أكتوبر" to Calendar.OCTOBER,
+            "نوفمبر" to Calendar.NOVEMBER,
+            "ديسمبر" to Calendar.DECEMBER
+        )
+    }
+
+    // List of years for custom selection
+    val currentYear = remember { Calendar.getInstance().get(Calendar.YEAR) }
+    val years = remember(currentYear) {
+        listOf(currentYear + 1, currentYear, currentYear - 1, currentYear - 2, currentYear - 3)
+    }
+
+    var selectedOffsetIndex by remember { mutableStateOf(0) }
+    var selectedMonthIndex by remember {
+        val cal = Calendar.getInstance().apply { timeInMillis = selectedDate }
+        mutableStateOf(cal.get(Calendar.MONTH))
+    }
+    var selectedYear by remember {
+        val cal = Calendar.getInstance().apply { timeInMillis = selectedDate }
+        mutableStateOf(cal.get(Calendar.YEAR))
+    }
+
+    val formattedDateLabel = remember(selectedDate) {
+        val cal = Calendar.getInstance().apply { timeInMillis = selectedDate }
+        val month = cal.get(Calendar.MONTH)
+        val year = cal.get(Calendar.YEAR)
+        val monthNames = arrayOf(
+            "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+            "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"
+        )
+        "${monthNames[month]} $year"
+    }
+
+    // Helper to calculate a timestamp given a relative month offset
+    fun calculateMonthOffsetTimestamp(offset: Int): Long {
+        val cal = Calendar.getInstance().apply {
+            add(Calendar.MONTH, -offset)
+            set(Calendar.DAY_OF_MONTH, 15) // Use middle of the month to avoid timezone shifts
+            set(Calendar.HOUR_OF_DAY, 12)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        return cal.timeInMillis
+    }
+
+    // Helper to calculate custom month/year timestamp
+    fun calculateCustomMonthTimestamp(month: Int, year: Int): Long {
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.YEAR, year)
+            set(Calendar.MONTH, month)
+            set(Calendar.DAY_OF_MONTH, 15)
+            set(Calendar.HOUR_OF_DAY, 12)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        return cal.timeInMillis
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DateRange,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = "شهر استحقاق الإيراد:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Text(
+                text = formattedDateLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Checkbox(
+                checked = isCustomMonthEnabled,
+                onCheckedChange = {
+                    isCustomMonthEnabled = it
+                    if (!it) {
+                        val calculated = calculateMonthOffsetTimestamp(monthOffsets[selectedOffsetIndex].second)
+                        onDateSelected(calculated)
+                    } else {
+                        val calculated = calculateCustomMonthTimestamp(selectedMonthIndex, selectedYear)
+                        onDateSelected(calculated)
+                    }
+                }
+            )
+            Text(
+                text = "اختيار شهر وسنة مخصصين",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+
+        if (!isCustomMonthEnabled) {
+            // Month dropdown offset
+            var monthDropdownExpanded by remember { mutableStateOf(false) }
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { monthDropdownExpanded = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = monthOffsets[selectedOffsetIndex].first,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                        )
+                        Icon(
+                            Icons.Default.ArrowDropDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+                DropdownMenu(
+                    expanded = monthDropdownExpanded,
+                    onDismissRequest = { monthDropdownExpanded = false }
+                ) {
+                    monthOffsets.forEachIndexed { index, pair ->
+                        DropdownMenuItem(
+                            text = { Text(pair.first, fontSize = 13.sp) },
+                            onClick = {
+                                selectedOffsetIndex = index
+                                monthDropdownExpanded = false
+                                val calculated = calculateMonthOffsetTimestamp(pair.second)
+                                onDateSelected(calculated)
+                            }
+                        )
+                    }
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Month selector
+                var customMonthDropdownExpanded by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.weight(1.1f)) {
+                    OutlinedButton(
+                        onClick = { customMonthDropdownExpanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = arabicMonths[selectedMonthIndex].first,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                            Icon(
+                                Icons.Default.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = customMonthDropdownExpanded,
+                        onDismissRequest = { customMonthDropdownExpanded = false }
+                    ) {
+                        arabicMonths.forEachIndexed { index, pair ->
+                            DropdownMenuItem(
+                                text = { Text(pair.first, fontSize = 12.sp) },
+                                onClick = {
+                                    selectedMonthIndex = index
+                                    customMonthDropdownExpanded = false
+                                    val calculated = calculateCustomMonthTimestamp(index, selectedYear)
+                                    onDateSelected(calculated)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Year selector
+                var customYearDropdownExpanded by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.weight(0.9f)) {
+                    OutlinedButton(
+                        onClick = { customYearDropdownExpanded = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = selectedYear.toString(),
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
+                            Icon(
+                                Icons.Default.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    DropdownMenu(
+                        expanded = customYearDropdownExpanded,
+                        onDismissRequest = { customYearDropdownExpanded = false }
+                    ) {
+                        years.forEach { year ->
+                            DropdownMenuItem(
+                                text = { Text(year.toString(), fontSize = 12.sp) },
+                                onClick = {
+                                    selectedYear = year
+                                    customYearDropdownExpanded = false
+                                    val calculated = calculateCustomMonthTimestamp(selectedMonthIndex, year)
+                                    onDateSelected(calculated)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

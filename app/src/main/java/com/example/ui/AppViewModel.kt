@@ -167,11 +167,33 @@ class AppViewModel(
         loadFamilySavedBalances()
     }
 
+    fun reopenWeekForEditing(weekKey: String) {
+        val families = _familiesState.value
+        val paidIds = getPaidFamilies(weekKey)
+        val editor = prefs.edit()
+        
+        for (family in families) {
+            val isPaid = paidIds.contains(family.id)
+            val prevReportedShareKey = "family_reported_share_${weekKey}_${family.id}"
+            val prevReportedShare = prefs.getFloat(prevReportedShareKey, 0f).toDouble()
+            
+            if (prevReportedShare > 0 && !isPaid) {
+                val currentSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
+                val newSaved = maxOf(0.0, currentSaved - prevReportedShare)
+                editor.putFloat("family_saved_balance_${family.id}", newSaved.toFloat())
+            }
+            editor.remove(prevReportedShareKey)
+        }
+        
+        editor.remove("week_reported_$weekKey")
+        editor.apply()
+        
+        loadFamilySavedBalances()
+        loadReportedWeeks()
+    }
+
     fun generateWeeklyDistributionReport(summary: WeeklySummary) {
         val weekKey = summary.weekKey
-        val alreadyReported = prefs.getBoolean("week_reported_$weekKey", false)
-        if (alreadyReported) return
-
         val now = System.currentTimeMillis()
         val families = familiesState.value
         if (families.isEmpty()) return
@@ -195,7 +217,7 @@ class AppViewModel(
             if (family.portion <= 0) 0.0 else {
                 val customKey = "family_custom_amount_${weekKey}_${family.id}"
                 val customVal = if (prefs.contains(customKey)) prefs.getFloat(customKey, 0f).toDouble() else null
-                customVal ?: (if (useFixedPortion) family.portion else defaultFamilyShare)
+                customVal ?: (if (useFixedPortion) (family.portion * summary.sharePerFamily) else defaultFamilyShare)
             }
         }
         sb.append("- إجمالي أنصبة الأسر الموزعة: ${String.format(Locale.US, "%,.2f", totalFamiliesPayout)} SDG\n\n")
@@ -210,21 +232,37 @@ class AppViewModel(
             val customKey = "family_custom_amount_${weekKey}_${family.id}"
             val customVal = if (prefs.contains(customKey)) prefs.getFloat(customKey, 0f).toDouble() else null
             val familyShare = if (family.portion <= 0) 0.0 else {
-                customVal ?: (if (useFixedPortion) family.portion else defaultFamilyShare)
+                customVal ?: (if (useFixedPortion) (family.portion * summary.sharePerFamily) else defaultFamilyShare)
             }
             
+            val prevReportedShareKey = "family_reported_share_${weekKey}_${family.id}"
+            val prevReportedShare = prefs.getFloat(prevReportedShareKey, 0f).toDouble()
+            
             if (familyShare <= 0) {
+                if (prevReportedShare > 0 && !isPaid) {
+                    val currentSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
+                    val newSaved = maxOf(0.0, currentSaved - prevReportedShare)
+                    editor.putFloat("family_saved_balance_${family.id}", newSaved.toFloat())
+                }
+                editor.putFloat(prevReportedShareKey, 0f)
                 sb.append("- ${family.name}: غير نشطة (0 جنيه)\n")
                 continue
             }
 
             if (isPaid) {
-                sb.append("- ${family.name} (المبلغ الموزع: ${String.format(Locale.US, "%,.0f", familyShare)} SDG): تم الاستلام\n")
+                if (prevReportedShare > 0) {
+                    val currentSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
+                    val newSaved = maxOf(0.0, currentSaved - prevReportedShare)
+                    editor.putFloat("family_saved_balance_${family.id}", newSaved.toFloat())
+                }
+                editor.putFloat(prevReportedShareKey, 0f)
+                sb.append("- ${family.name} (المبلغ الموزع: ${String.format(Locale.US, "%,.0f", familyShare)} SDG): تم الاستلام نقدًا\n")
             } else {
                 val currentSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
-                val newSaved = currentSaved + familyShare
+                val newSaved = maxOf(0.0, currentSaved - prevReportedShare + familyShare)
                 editor.putFloat("family_saved_balance_${family.id}", newSaved.toFloat())
                 
+                editor.putFloat(prevReportedShareKey, familyShare.toFloat())
                 sb.append("- ${family.name} (المبلغ الموزع: ${String.format(Locale.US, "%,.0f", familyShare)} SDG): لم يتم الاستلام ❌ (تم حفظ وحجز نصيبها البالغ ${String.format(Locale.US, "%,.0f", familyShare)} SDG وتراكمه في حسابها)\n")
             }
         }
@@ -238,7 +276,7 @@ class AppViewModel(
             val customKey = "family_custom_amount_${weekKey}_${family.id}"
             val customVal = if (prefs.contains(customKey)) prefs.getFloat(customKey, 0f).toDouble() else null
             val familyShare = if (family.portion <= 0) 0.0 else {
-                customVal ?: (if (useFixedPortion) family.portion else defaultFamilyShare)
+                customVal ?: (if (useFixedPortion) (family.portion * summary.sharePerFamily) else defaultFamilyShare)
             }
             if (familyShare > 0 || family.portion > 0) {
                 val totalSaved = prefs.getFloat("family_saved_balance_${family.id}", 0f).toDouble()
@@ -516,11 +554,11 @@ class AppViewModel(
         loadReportedWeeks()
 
         // Automatically monitor weekly summaries to check and generate reports for completed weeks
-        viewModelScope.launch {
-            weeklyRickshawSummaries.collect { summaries ->
-                checkAndGenerateAutomaticReports(summaries)
-            }
-        }
+        // viewModelScope.launch {
+        //     weeklyRickshawSummaries.collect { summaries ->
+        //         checkAndGenerateAutomaticReports(summaries)
+        //     }
+        // }
     }
 
     // ------------------ Database Insertions & Deletions ------------------
@@ -614,6 +652,78 @@ class AppViewModel(
     fun deleteRickshawRevenue(revenue: RickshawRevenue) {
         viewModelScope.launch {
             repository.deleteRickshawRevenue(revenue)
+        }
+    }
+
+    fun saveRickshawRevenuesAndDistribute(
+        weekKey: String,
+        revenues: List<Pair<Int, Double>>,
+        date: Long,
+        notes: String,
+        screenshotUris: List<Uri>,
+        customShares: Map<Int, Double>?
+    ) {
+        viewModelScope.launch {
+            val paths = screenshotUris.mapNotNull { repository.copyScreenshotToInternalStorage(context, it) }
+            val path = if (paths.isNotEmpty()) paths.joinToString("|") else null
+            
+            for (rev in revenues) {
+                repository.insertRickshawRevenue(
+                    RickshawRevenue(
+                        rickshawId = rev.first,
+                        amount = rev.second,
+                        date = date,
+                        notes = notes,
+                        screenshotPath = path
+                    )
+                )
+            }
+            
+            if (customShares != null) {
+                val editor = prefs.edit()
+                for ((familyId, amount) in customShares) {
+                    val key = "family_custom_amount_${weekKey}_${familyId}"
+                    editor.putFloat(key, amount.toFloat())
+                }
+                editor.apply()
+                loadFamilyCustomAmounts()
+            }
+            
+            kotlinx.coroutines.delay(500)
+            
+            val summaries = weeklyRickshawSummaries.value
+            val summary = summaries.find { it.weekKey == weekKey }
+            if (summary != null) {
+                generateWeeklyDistributionReport(summary)
+            } else {
+                val currentRevenues = allRickshawRevenues.value.filter { getWeekRangeString(it.date) == weekKey }
+                val currentDeductions = allDeductions.value.filter { it.category == "RICKSHAW" && getWeekRangeString(it.date) == weekKey }
+                val families = familiesState.value
+                val totalPortions = families.sumOf { it.portion }
+                val activeFamiliesCount = families.count { it.portion > 0 }
+                val totalRev = currentRevenues.sumOf { it.amount } + revenues.sumOf { it.second }
+                val totalDed = currentDeductions.sumOf { it.amount }
+                val net = totalRev - totalDed
+                
+                val useFixedPortion = prefs.getBoolean("use_fixed_portion", true)
+                val share = if (useFixedPortion) {
+                    if (net > 0 && totalPortions > 0) net / totalPortions else 0.0
+                } else {
+                    if (net > 0 && activeFamiliesCount > 0) net / activeFamiliesCount else 0.0
+                }
+                
+                val fallbackSummary = WeeklySummary(
+                    weekKey = weekKey,
+                    startTimestamp = date,
+                    totalRevenue = totalRev,
+                    totalDeductions = totalDed,
+                    netRevenue = net,
+                    sharePerFamily = share,
+                    revenues = currentRevenues,
+                    deductions = currentDeductions
+                )
+                generateWeeklyDistributionReport(fallbackSummary)
+            }
         }
     }
 
